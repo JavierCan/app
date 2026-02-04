@@ -2,6 +2,14 @@ import streamlit as st
 from streamlit_webrtc import webrtc_streamer
 import cv2
 import mediapipe as mp
+# --- PARCHE DE IMPORTACIÓN PROFUNDA ---
+try:
+    from mediapipe.python.solutions import hands as mp_hands
+    from mediapipe.python.solutions import drawing_utils as mp_drawing
+except ImportError:
+    import mediapipe.solutions.hands as mp_hands
+    import mediapipe.solutions.drawing_utils as mp_drawing
+# --------------------------------------
 import math
 import av
 import threading
@@ -9,13 +17,20 @@ import time
 import pandas as pd
 from supabase import create_client, Client
 
-# --- IMPORTACIÓN ESTÁNDAR ---
-mp_hands = mp.solutions.hands
-mp_drawing = mp.solutions.drawing_utils
-
-# --- CONFIGURACIÓN ---
+# --- 1. CONFIGURACIÓN VISUAL ---
 st.set_page_config(page_title="Love Intelligence Pro", layout="wide", page_icon="🫰")
 
+st.markdown("""
+    <style>
+    .main { background: #050505; color: #ffffff; }
+    .stMetric { 
+        background: linear-gradient(135deg, rgba(255,0,150,0.1), rgba(0,255,255,0.1)); 
+        border: 2px solid #ff0096; border-radius: 15px; padding: 15px;
+    }
+    </style>
+    """, unsafe_allow_html=True)
+
+# Credenciales de Supabase
 URL = "https://byzsjfizbtmzvstkvcuu.supabase.co"
 KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImJ5enNqZml6YnRtenZzdGt2Y3V1Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzAxNjc4NzMsImV4cCI6MjA4NTc0Mzg3M30.Pv2CpCJsCfKJlJydHuzF7H0WFg3u5f_xRHkB21_YGEo"
 
@@ -25,17 +40,18 @@ def init_supabase():
 
 supabase = init_supabase()
 
+# --- 2. PROCESADOR DE VIDEO OPTIMIZADO ---
 class VideoProcessor:
     def __init__(self):
         self.hands = mp_hands.Hands(
             static_image_mode=False,
             max_num_hands=2,
-            min_detection_confidence=0.5,
-            min_tracking_confidence=0.5
+            min_detection_confidence=0.6,
+            min_tracking_confidence=0.6
         )
         self.ultimo_envio = 0
-        self.alpha = 0.3
-        self.dist_k_filtrada = 1.0
+        self.alpha = 0.3  # Filtro de estabilidad
+        self.dist_k_filtrada = 1.0 
 
     def enviar_datos(self, tipo, frame_img):
         try:
@@ -64,40 +80,57 @@ class VideoProcessor:
             for hand_lms in results.multi_hand_landmarks:
                 mp_drawing.draw_landmarks(img, hand_lms, mp_hands.HAND_CONNECTIONS)
                 p = hand_lms.landmark
-                # Lógica K-Heart
+                
+                # Detección K-Heart con Filtro
                 dist_raw = math.hypot(p[4].x - p[8].x, p[4].y - p[8].y)
                 self.dist_k_filtrada = (self.alpha * dist_raw) + ((1 - self.alpha) * self.dist_k_filtrada)
                 
-                if 0.005 < self.dist_k_filtrada < 0.035:
+                if 0.005 < self.dist_k_filtrada < 0.04:
                     gesto_detectado = "korean_heart"
 
         if gesto_detectado:
-            cv2.putText(img, "🫰 K-HEART DETECTED", (50, 50), cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 0, 255), 2)
-            if time.time() - self.ultimo_envio > 6:
-                self.ultimo_envio = time.time()
+            cv2.putText(img, "🫰 K-HEART ACTIVE", (50, 50), cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 0, 255), 2)
+            ahora = time.time()
+            if ahora - self.ultimo_envio > 6:
+                self.ultimo_envio = ahora
                 threading.Thread(target=self.enviar_datos, args=(gesto_detectado, img.copy())).start()
         
         return av.VideoFrame.from_ndarray(img, format="bgr24")
 
-# --- UI ---
-st.title("🌌 Love Intelligence Deploy")
+# --- 3. DASHBOARD ---
+st.title("🌌 Love Intelligence v8.5")
+
+# Selector de cámara lateral
+st.sidebar.header("Cámara")
 cam_mode = st.sidebar.radio("Cámara:", ("Frontal", "Trasera"))
 facing_mode = "user" if cam_mode == "Frontal" else "environment"
 
-webrtc_streamer(
-    key="deploy-final", 
-    video_processor_factory=VideoProcessor,
-    media_stream_constraints={"video": {"facingMode": facing_mode}, "audio": False},
-    rtc_configuration={"iceServers": [{"urls": ["stun:stun.l.google.com:19302"]}]},
-    video_html_attrs={"playsInline": True, "autoPlay": True, "muted": True}
-)
+kpi_area = st.empty()
+c1, c2 = st.columns([1.5, 1])
 
-# Galería rápida
-try:
-    res = supabase.table("registros").select("*").order("id", desc=True).limit(4).execute()
-    if res.data:
-        st.subheader("Últimas capturas")
-        cols = st.columns(4)
-        for i, row in enumerate(res.data):
-            cols[i].image(row['foto_url'])
-except: pass
+with c1:
+    webrtc_streamer(
+        key="v8-5-fixed", 
+        video_processor_factory=VideoProcessor,
+        media_stream_constraints={"video": {"facingMode": facing_mode}, "audio": False},
+        rtc_configuration={"iceServers": [{"urls": ["stun:stun.l.google.com:19302"]}]},
+        video_html_attrs={"playsInline": True, "autoPlay": True, "muted": True}
+    )
+
+with c2:
+    gallery_area = st.empty()
+
+# --- 4. BUCLE DE DATOS ---
+while True:
+    try:
+        res = supabase.table("registros").select("*").order("id", desc=True).limit(4).execute()
+        df = pd.DataFrame(res.data) if res.data else pd.DataFrame()
+        if not df.empty:
+            df['created_at'] = pd.to_datetime(df['created_at'], utc=True)
+            with kpi_area.container():
+                st.metric("🔥 TOTAL GESTOS", df['conteo_acumulado'].max())
+            with gallery_area.container():
+                for i, row in df.iterrows():
+                    st.image(row['foto_url'], caption=row['created_at'].strftime('%H:%M:%S'))
+    except: pass
+    time.sleep(3)
