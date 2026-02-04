@@ -6,3 +6,4 @@ supabase
 pandas
 numpy
 av
+plotly
