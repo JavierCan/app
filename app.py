@@ -1,5 +1,5 @@
 import streamlit as st
-from streamlit_webrtc import webrtc_streamer, VideoHTMLAttributes
+from streamlit_webrtc import webrtc_streamer
 import cv2
 import mediapipe as mp
 import math
@@ -10,6 +10,11 @@ import pandas as pd
 import plotly.express as px
 from supabase import create_client, Client
 from datetime import datetime
+
+# --- PARCHE CRÍTICO PARA MEDIAPIPE ---
+# Forzamos la carga de los submódulos para evitar el AttributeError
+mp_hands = mp.solutions.hands
+mp_drawing = mp.solutions.drawing_utils
 
 # --- 1. CONFIGURACIÓN VISUAL ---
 st.set_page_config(page_title="Love Intelligence Pro", layout="wide", page_icon="🫰")
@@ -44,10 +49,15 @@ supabase = init_supabase()
 # --- 2. PROCESADOR DE VIDEO CON FILTRO DE ESTABILIDAD ---
 class VideoProcessor:
     def __init__(self):
-        self.hands = mp.solutions.hands.Hands(min_detection_confidence=0.7, min_tracking_confidence=0.7)
-        self.mp_draw = mp.solutions.drawing_utils
+        # Usamos los módulos parcheados arriba
+        self.hands = mp_hands.Hands(
+            static_image_mode=False,
+            max_num_hands=2,
+            min_detection_confidence=0.7, 
+            min_tracking_confidence=0.7
+        )
         self.ultimo_envio = 0
-        self.alpha = 0.2  # Filtro Kalman-light
+        self.alpha = 0.3  # Filtro suavizado
         self.dist_k_filtrada = 1.0 
 
     def enviar_datos(self, tipo, frame_img):
@@ -64,41 +74,39 @@ class VideoProcessor:
                 "tipo_gesto": tipo, "foto_url": url, "conteo_acumulado": count, 
                 "created_at": pd.Timestamp.now(tz='UTC').isoformat()
             }).execute()
-        except Exception as e: print(f"Error subida: {e}")
+        except: pass
 
     def recv(self, frame):
         img = frame.to_ndarray(format="bgr24")
         img = cv2.flip(img, 1)
         clean_img = img.copy()
-        results = self.hands.process(cv2.cvtColor(img, cv2.COLOR_BGR2RGB))
+        
+        # Convertimos a RGB para MediaPipe
+        img_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+        results = self.hands.process(img_rgb)
         
         gesto_detectado = None
         
         if results.multi_hand_landmarks:
             for hand_lms in results.multi_hand_landmarks:
-                self.mp_draw.draw_landmarks(img, hand_lms, mp.solutions.hands.HAND_CONNECTIONS)
+                mp_drawing.draw_landmarks(img, hand_lms, mp_hands.HAND_CONNECTIONS)
                 p = hand_lms.landmark
                 
-                # --- Filtro de Distancia ---
+                # --- Filtro de Distancia K-Heart ---
                 dist_raw = math.hypot(p[4].x - p[8].x, p[4].y - p[8].y)
                 self.dist_k_filtrada = (self.alpha * dist_raw) + ((1 - self.alpha) * self.dist_k_filtrada)
                 
                 if 0.005 < self.dist_k_filtrada < 0.035:
                     gesto_detectado = "korean_heart"
 
-            if len(results.multi_hand_landmarks) == 2:
-                h1, h2 = results.multi_hand_landmarks[0].landmark, results.multi_hand_landmarks[1].landmark
-                dn = (math.hypot(h1[8].x-h2[8].x, h1[8].y-h2[8].y) + math.hypot(h1[4].x-h2[4].x, h1[4].y-h2[4].y))/2
-                if dn < 0.06: gesto_detectado = "normal_heart"
-
         if gesto_detectado:
-            color = (255, 0, 255) if gesto_detectado == "korean_heart" else (0, 255, 0)
+            # Eliminamos emojis del texto de OpenCV para evitar los "????"
+            txt = "K-HEART DETECTADO"
             cv2.rectangle(img, (0, 0), (640, 60), (0,0,0), -1)
-            cv2.putText(img, f"🫰 {gesto_detectado.upper()} ACTIVO", (120, 40), cv2.FONT_HERSHEY_DUPLEX, 1, color, 2)
+            cv2.putText(img, txt, (120, 40), cv2.FONT_HERSHEY_DUPLEX, 1, (255, 0, 255), 2)
             
-            ahora = time.time()
-            if ahora - self.ultimo_envio > 6:
-                self.ultimo_envio = ahora
+            if time.time() - self.ultimo_envio > 6:
+                self.ultimo_envio = time.time()
                 threading.Thread(target=self.enviar_datos, args=(gesto_detectado, clean_img)).start()
         
         return av.VideoFrame.from_ndarray(img, format="bgr24")
@@ -106,8 +114,7 @@ class VideoProcessor:
 # --- 3. DASHBOARD UI ---
 st.title("🌌 Love Intelligence Command Center")
 
-# Selector de cámara en la barra lateral
-st.sidebar.header("📸 Opciones de Cámara")
+st.sidebar.header("📸 Cámara")
 cam_mode = st.sidebar.radio("Modo:", ("Frontal", "Trasera"))
 facing_mode = "user" if cam_mode == "Frontal" else "environment"
 
@@ -118,7 +125,7 @@ c1, c2 = st.columns([1.3, 1.7])
 
 with c1:
     webrtc_streamer(
-        key="love-v8", 
+        key="love-v9-deploy", 
         video_processor_factory=VideoProcessor,
         media_stream_constraints={"video": {"facingMode": facing_mode}, "audio": False},
         rtc_configuration={"iceServers": [{"urls": ["stun:stun.l.google.com:19302"]}]},
@@ -138,18 +145,17 @@ while True:
 
         if not df.empty:
             df['created_at'] = pd.to_datetime(df['created_at'], utc=True)
-            
             with kpi_area.container():
                 m1, m2, m3, m4 = st.columns(4)
                 m1.metric("🔥 TOTAL", df['conteo_acumulado'].max())
                 m2.metric("🫰 K-STYLE", len(df[df['tipo_gesto'] == 'korean_heart']))
                 m3.metric("❤️ NORMAL", len(df[df['tipo_gesto'] == 'normal_heart']))
-                m4.metric("⏱️ STATUS", "ONLINE", delta="LIVE")
+                m4.metric("⏱️ STATUS", "ONLINE")
 
             ahora_utc = pd.Timestamp.now(tz='UTC')
             recientes = df[df['created_at'] > (ahora_utc - pd.Timedelta(seconds=60))]
             if len(recientes) >= 3:
-                combo_placeholder.markdown(f"<div class='combo-box'>🔥 COMBO X{len(recientes)}: ¡ESTÁS ON FIRE! ❤️‍F</div>", unsafe_allow_html=True)
+                combo_placeholder.markdown(f"<div class='combo-box'>🔥 COMBO X{len(recientes)}: ¡ON FIRE! ❤️‍F</div>", unsafe_allow_html=True)
             else: combo_placeholder.empty()
 
             with chart_area.container():
@@ -163,6 +169,6 @@ while True:
                 for i, row in df.head(6).iterrows():
                     with cols[i % 3]:
                         st.image(row['foto_url'], width='stretch')
-                        st.caption(f"{row['tipo_gesto']} | {row['created_at'].strftime('%H:%M:%S')}")
+                        st.caption(f"{row['created_at'].strftime('%H:%M:%S')}")
     except: pass
     time.sleep(2)
