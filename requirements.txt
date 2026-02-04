@@ -1,0 +1,9 @@
+streamlit
+streamlit-webrtc
+opencv-python-headless
+mediapipe
+supabase
+pandas
+plotly
+numpy
+av
