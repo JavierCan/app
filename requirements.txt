@@ -1,7 +1,7 @@
 streamlit
 streamlit-webrtc
 opencv-python-headless
-mediapipe
+mediapipe==0.10.11
 supabase
 pandas
 numpy
